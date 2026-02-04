@@ -78,14 +78,10 @@ def _calculate_safe_concurrency() -> int:
         available_gb = mem.available / (1024**3)
 
         if total_gb >= MIN_TOTAL_RAM_GB and available_gb >= MIN_AVAILABLE_RAM_GB:
-            logger.debug(
-                f"Kathara concurrency: 2 (total={total_gb:.1f}GB, available={available_gb:.1f}GB)"
-            )
+            logger.debug(f"Kathara concurrency: 2 (total={total_gb:.1f}GB, available={available_gb:.1f}GB)")
             return 2
 
-        logger.debug(
-            f"Kathara concurrency: 1 (total={total_gb:.1f}GB, available={available_gb:.1f}GB)"
-        )
+        logger.debug(f"Kathara concurrency: 1 (total={total_gb:.1f}GB, available={available_gb:.1f}GB)")
         return 1
 
     except ImportError:
@@ -170,9 +166,7 @@ class KatharaSandboxEnvironment(DockerSandboxEnvironment):
 
             # Allow services to stabilize before releasing semaphore
             # This gives FRR, BIND, and other services time to initialize
-            logger.debug(
-                f"Waiting {STARTUP_STABILIZATION_DELAY}s for services to stabilize"
-            )
+            logger.debug(f"Waiting {STARTUP_STABILIZATION_DELAY}s for services to stabilize")
             await asyncio.sleep(STARTUP_STABILIZATION_DELAY)
 
         logger.debug(f"Kathara stack ready for task '{task_name}'")
@@ -188,10 +182,6 @@ HOST_CAPABILITIES = ["NET_ADMIN"]
 ROUTER_SYSCTLS = {"net.ipv4.ip_forward": "1"}
 
 
-def _allocate_subnet(idx: int, base: str = "172.28") -> str:
-    return f"{base}.{idx // 16}.{(idx % 16) * 16}/28"
-
-
 def _find_startup_file(
     lab_path: Path,
     machine_name: str,
@@ -200,14 +190,13 @@ def _find_startup_file(
     """Find startup file for a machine.
 
     Args:
-        lab_path: Path to the lab directory containing lab.conf.
+        lab_path: Path to the lab directory containing topology/lab.conf.
         machine_name: Name of the machine.
         startup_pattern: Optional pattern for startup file path relative to lab_path.
             Use {name} as placeholder for machine name.
-            Default: "topology/{name}/{name}.startup" (Nika convention).
-            Example: "{name}.startup" (flat structure).
+            Default: "topology/{name}.startup".
     """
-    pattern = startup_pattern or "topology/{name}/{name}.startup"
+    pattern = startup_pattern or "topology/{name}.startup"
     startup_path = lab_path / pattern.format(name=machine_name)
     return startup_path if startup_path.exists() else None
 
@@ -226,11 +215,7 @@ def _get_startup_script(
         return None
 
     lines = startup_file.read_text().strip().split("\n")
-    commands = [
-        line.strip()
-        for line in lines
-        if line.strip() and not line.strip().startswith("#")
-    ]
+    commands = [line.strip() for line in lines if line.strip() and not line.strip().startswith("#")]
     return " && ".join(commands) if commands else None
 
 
@@ -241,7 +226,7 @@ def generate_compose_for_inspect(
     subnet_base: str | None = None,
     startup_pattern: str | None = None,
 ) -> str:
-    lab_conf_path = lab_path / "lab.conf"
+    lab_conf_path = lab_path / "topology" / "lab.conf"
     if not lab_conf_path.exists():
         raise FileNotFoundError(f"lab.conf not found at {lab_conf_path}")
 
@@ -249,22 +234,28 @@ def generate_compose_for_inspect(
     if not lab_config.machines:
         raise ValueError(f"No machines found in {lab_conf_path}")
 
-    subnet_base = subnet_base or lab_config.metadata.get("SUBNET_BASE", "172.28")
-
     all_domains: set[str] = set()
     for machine in lab_config.machines.values():
         all_domains.update(machine.collision_domains)
 
     services: dict[str, Any] = {}
     networks: dict[str, Any] = {
-        domain: {"driver": "bridge", "internal": True, "ipam": {"config": [{"subnet": _allocate_subnet(idx, subnet_base)}]}}
+        domain: {
+            "driver": "bridge",
+            "internal": True,
+            "enable_ipv6": True,
+            "enable_ipv4": False,
+            "ipam": {"config": []},
+        }
         for idx, domain in enumerate(sorted(all_domains))
     }
 
     machine_names = list(lab_config.machines.keys())
     if default_machine is not None:
         if default_machine not in lab_config.machines:
-            raise ValueError(f"default_machine '{default_machine}' not found in lab.conf. Available machines: {', '.join(lab_config.machines.keys())}")
+            raise ValueError(
+                f"default_machine '{default_machine}' not found in lab.conf. Available machines: {', '.join(lab_config.machines.keys())}"
+            )
         machine_names.remove(default_machine)
         machine_names.insert(0, default_machine)
 
@@ -273,7 +264,8 @@ def generate_compose_for_inspect(
         image = config.image or DEFAULT_IMAGE
         validate_kathara_image(image)
         is_router = is_routing_image(image)
-        service_name = "default" if idx == 0 else machine_name
+        startup_command = None
+        copy_command = None
 
         service: dict[str, Any] = {
             "image": image,
@@ -290,12 +282,9 @@ def generate_compose_for_inspect(
             service["networks"] = list(config.collision_domains)
 
         startup_script = _get_startup_script(lab_path, machine_name, startup_configs, startup_pattern)
-        service["command"] = "sleep infinity"
         if startup_script:
             # Use space instead of && if script ends with & (background process)
-            startup_script = startup_script.rstrip()
-            separator = " " if startup_script.endswith("&") else " && "
-            service["command"] = f"sh -c '{startup_script}{separator}sleep infinity'"
+            startup_command = startup_script.rstrip()
 
         # Add health check for images with services (e.g., named for bind, frr for routers)
         expected_services = get_image_services(image)
@@ -310,9 +299,35 @@ def generate_compose_for_inspect(
                 "start_period": "5s",
             }
 
-        services[service_name] = service
+        # Add volumes and copy configuration files
+        config_dir = lab_path / "topology" / machine_name
+        if config_dir.exists() and config_dir.is_dir():
+            service.setdefault("volumes", [])
+            service["volumes"].append(f"{config_dir}:/tmp/config:ro")
+            copy_command = "cp -r /tmp/config/* /"
+
+        # Compose commands
+        service["command"] = "sh -lc '"
+
+        # Flush all addresses assigned by Docker
+        service["command"] += 'for d in $(ls /sys/class/net | grep -v lo); do ip addr flush dev "$$d"; done; '
+        # Flush all default routes
+        service["command"] += 'for d in $(ls /sys/class/net | grep -v lo); do ip route flush dev "$$d"; done; '
+
+        if copy_command:
+            service["command"] += f"{copy_command} && "
+
+        if startup_command:
+            service["command"] += f"{startup_command} && "
+
+        service["command"] += "sleep infinity'"
+
         if idx == 0 and machine_name != "default":
-            services[machine_name] = service.copy()
+            default_service = service.copy()
+            default_service["command"] = "sleep infinity"
+            default_service.pop("volumes", None)
+            services["default"] = default_service
+        services[machine_name] = service
 
     yaml_content = yaml.dump({"services": services, "networks": networks}, default_flow_style=False, sort_keys=False)
     header = f"# Auto-generated from Kathara lab.conf\n# Machines: {', '.join(machine_names)}\n# Networks: {', '.join(sorted(all_domains))}\n\n"
@@ -341,7 +356,7 @@ def write_compose_for_lab(
 
 
 def get_machine_service_mapping(lab_path: Path) -> dict[str, str]:
-    lab_conf_path = lab_path / "lab.conf"
+    lab_conf_path = lab_path / "topology" / "lab.conf"
     if not lab_conf_path.exists():
         raise FileNotFoundError(f"lab.conf not found at {lab_conf_path}")
 
@@ -350,16 +365,19 @@ def get_machine_service_mapping(lab_path: Path) -> dict[str, str]:
 
 
 def estimate_startup_time(lab_path: Path) -> int:
-    lab_conf_path = lab_path / "lab.conf"
+    lab_conf_path = lab_path / "topology" / "lab.conf"
     if not lab_conf_path.exists():
         return 10
 
     lab_config = parse_lab_conf(lab_conf_path)
-    return max((get_startup_delay(config.image or DEFAULT_IMAGE) for config in lab_config.machines.values()), default=5) + 5
+    return (
+        max((get_startup_delay(config.image or DEFAULT_IMAGE) for config in lab_config.machines.values()), default=5)
+        + 5
+    )
 
 
 def get_frr_services(lab_path: Path) -> list[str]:
-    lab_conf_path = lab_path / "lab.conf"
+    lab_conf_path = lab_path / "topology" / "lab.conf"
     if not lab_conf_path.exists():
         return []
 

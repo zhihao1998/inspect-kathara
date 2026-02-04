@@ -57,7 +57,7 @@ def network_troubleshoot() -> Task:
 Generate and write `compose.yaml` from a Kathara lab configuration.
 
 **Parameters:**
-- `lab_path`: Path to directory containing `lab.conf`
+- `lab_path`: Path to directory containing `topology/lab.conf`
 - `output_path`: Output path (defaults to `lab_path/compose.yaml`)
 - `startup_configs`: Optional dict of machine -> startup script overrides
 - `default_machine`: Machine to use as Inspect's default sandbox

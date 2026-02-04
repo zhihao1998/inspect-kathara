@@ -248,9 +248,7 @@ def generate_compose_from_topology(
             if machine_name in services:
                 if "networks" not in services[machine_name]:
                     services[machine_name]["networks"] = {}
-                services[machine_name]["networks"][net_name] = {
-                    "ipv4_address": ip_address
-                }
+                services[machine_name]["networks"][net_name] = {"ipv4_address": ip_address}
 
     compose_dict = {
         "services": services,
@@ -309,13 +307,9 @@ def _create_service_config(
         links_for_machine = machine_links.get(name, [])
         for link_idx, subnet in links_for_machine:
             iface = f"eth{link_idx}"
-            ip_with_mask = _get_ip_for_machine_in_link(
-                name, link_idx, subnet, machine_links
-            )
+            ip_with_mask = _get_ip_for_machine_in_link(name, link_idx, subnet, machine_links)
             if ip_with_mask:
-                startup_parts.append(
-                    f"ip addr add {ip_with_mask} dev {iface} 2>/dev/null || true"
-                )
+                startup_parts.append(f"ip addr add {ip_with_mask} dev {iface} 2>/dev/null || true")
                 startup_parts.append(f"ip link set {iface} up")
 
     if "startup" in config:
@@ -437,8 +431,7 @@ def validate_topology(topology: TopologyDefinition) -> list[str]:
         image = config.get("image", DEFAULT_IMAGE)
         if not image.startswith("kathara/"):
             logger.warning(
-                f"Machine {name} uses non-Kathara image: {image}. "
-                "Consider using kathara/* images for consistency."
+                f"Machine {name} uses non-Kathara image: {image}. Consider using kathara/* images for consistency."
             )
 
     return errors
