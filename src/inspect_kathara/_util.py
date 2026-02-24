@@ -28,13 +28,13 @@ IMAGE_CONFIGS: dict[str, dict[str, Any]] = {
     "kathara/sdn": {
         "services": ["openvswitch-switch"],
         "startup_delay": 5,
-        "routing_capable": False,
+        "routing_capable": True,
         "vtysh_available": False,
     },
     "kathara/p4": {
         "services": ["simple_switch_grpc"],
         "startup_delay": 5,
-        "routing_capable": False,
+        "routing_capable": True,
         "vtysh_available": False,
     },
     "kathara/scion": {"services": [], "startup_delay": 8, "routing_capable": False, "vtysh_available": False},
@@ -52,6 +52,12 @@ IMAGE_CONFIGS: dict[str, dict[str, Any]] = {
         "services": ["ryu-manager"],
         "startup_delay": 3,
         "routing_capable": True,
+        "vtysh_available": False,
+    },
+    "kathara/nika-influxdb": {
+        "services": ["influx"],
+        "startup_delay": 3,
+        "routing_capable": False,
         "vtysh_available": False,
     },
 }

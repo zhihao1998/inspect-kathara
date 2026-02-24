@@ -248,17 +248,31 @@ def generate_compose_for_inspect(
     for machine in lab_config.machines.values():
         all_domains.update(domain for _, domain in machine.collision_domains)
 
+    # Assign each network a dedicated /28 subnet to avoid exhausting Docker's
+    # default address pools ("all predefined address pools have been fully subnetted").
+    # Base 10.128.0.0; each collision domain gets one /28 (16 addresses).
+    sorted_domains = sorted(all_domains)
     services: dict[str, Any] = {}
-    networks: dict[str, Any] = {
-        domain: {
+    networks: dict[str, Any] = {}
+    for idx, domain in enumerate(sorted_domains):
+        subnet_addr = 0x0A80_0000 + idx * 16  # 10.128.0.0 + idx*16
+        a, b, c, d = (
+            (subnet_addr >> 24) & 0xFF,
+            (subnet_addr >> 16) & 0xFF,
+            (subnet_addr >> 8) & 0xFF,
+            subnet_addr & 0xFF,
+        )
+        subnet = f"{a}.{b}.{c}.{d}/28"
+        networks[domain] = {
             "driver": "bridge",
             "internal": True,
             "enable_ipv6": False,
             "enable_ipv4": True,
-            "ipam": {"config": []},
+            "ipam": {
+                "driver": "default",
+                "config": [{"subnet": subnet}],
+            },
         }
-        for idx, domain in enumerate(sorted(all_domains))
-    }
     # add a default machine
     services["default"] = {
         "image": DEFAULT_IMAGE,
@@ -284,6 +298,7 @@ def generate_compose_for_inspect(
             "init": True,
             "hostname": machine_name,
             "cap_add": ROUTER_CAPABILITIES if is_router else HOST_CAPABILITIES,
+            "privileged": True,
         }
 
         if is_router:
@@ -319,11 +334,11 @@ def generate_compose_for_inspect(
         if config_dir.exists() and config_dir.is_dir():
             service.setdefault("volumes", [])
             service["volumes"].append(f"./{config_dir.relative_to(lab_path).as_posix()}:/tmp/config:ro")
-            copy_command = "cp -r /tmp/config/* /"
+            copy_command = "cp -r /tmp/config/* /;"
 
         # Compose commands: build as multiline for readable YAML (command: |- ...)
         cmd_lines = [
-            "sh -lc '",
+            "bash -lc '",
             'for d in $(ls /sys/class/net | grep -v lo); do ip addr flush dev "$$d"; done;',
             'for d in $(ls /sys/class/net | grep -v lo); do ip route flush dev "$$d"; done;',
         ]
