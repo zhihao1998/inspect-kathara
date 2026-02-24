@@ -1,8 +1,22 @@
 # inspect-kathara
 
-Kathara network lab integration for [Inspect AI](https://inspect.aisi.org.uk/) evaluations.
+Run AI agent evaluations inside isolated network topologies. Test whether models can diagnose misconfigurations, fix routing issues, and troubleshoot connectivity—all in safe, reproducible Docker environments.
 
-This package converts [Kathara](https://www.kathara.org/) lab configurations into Docker Compose format and registers a **kathara** sandbox type with Inspect AI, enabling network topology-based AI agent evaluations with conservative concurrency and serialized container startup.
+## What is this?
+
+This package provides [Inspect AI](https://inspect.aisi.org.uk/) integration for Docker-based network sandboxes. You define a network topology with `compose.yaml`, and Inspect AI agents can execute commands across multiple containers.
+
+## Why use this?
+
+- **Network troubleshooting benchmarks** — Test whether AI agents can diagnose and fix real connectivity issues (missing routes, firewall rules, disabled forwarding)
+- **Agent tool use in constrained environments** — Evaluate models that must systematically explore and modify multi-container setups
+- **Reproducible multi-container scenarios** — Each evaluation runs in fresh, isolated containers with consistent initial state
+
+## Requirements
+
+- Python 3.10+
+- Docker Desktop or OrbStack
+- Inspect AI >= 0.3.0
 
 ## Installation
 
@@ -24,95 +38,92 @@ pip install inspect-kathara[memory]
 
 ## Quick Start
 
-### 1. Generate Docker Compose from Kathara lab
+### 1. Create a network topology
 
-`lab_path` must be a directory containing `topology/lab.conf`:
+Create `compose.yaml` with your containers. The `default` service is where the agent starts:
 
-```python
-from pathlib import Path
-from inspect_kathara import write_compose_for_lab
+```yaml
+services:
+  default:
+    image: kathara/base
+    hostname: pc1
+    cap_add: [NET_ADMIN]
+    networks: [lan]
+    command: sh -c 'ip addr add 10.0.1.10/24 dev eth0 && sleep infinity'
 
-lab_path = Path("./my_lab")  # my_lab/topology/lab.conf must exist
-write_compose_for_lab(lab_path)  # writes my_lab/compose.yaml
+  pc2:
+    image: kathara/base
+    hostname: pc2
+    cap_add: [NET_ADMIN]
+    networks: [lan]
+    command: sh -c 'ip addr add 10.0.1.20/24 dev eth0 && sleep infinity'
+
+networks:
+  lan:
+    driver: bridge
+    internal: true
 ```
 
-### 2. Use with Inspect AI
+### 2. Create an evaluation task
 
 You can use either the generic **docker** sandbox (path to compose file or directory containing `compose.yaml`) or the **kathara** sandbox type, which adds memory-based concurrency limits and serialized startup:
 
 ```python
 from inspect_ai import Task, task
 from inspect_ai.dataset import Sample
+from inspect_ai.solver import generate
+from inspect_ai.tool import bash
 
 @task
-def network_troubleshoot() -> Task:
+def network_ping() -> Task:
     return Task(
         dataset=[
             Sample(
-                input="Diagnose and fix the network issue",
-                sandbox=("docker", "./my_lab/compose.yaml"),
+                input="Ping pc2 at 10.0.1.20",
+                sandbox=("docker", "./compose.yaml"),
             )
         ],
-        # ... solver and scorer
+        solver=generate(tools=[bash()]),
     )
 ```
 
-In YAML datasets, the kathara sandbox is specified as:
+### 3. Run it
 
-```yaml
-samples:
-  - id: my_sample
-    sandbox: [kathara, "path/to/compose.yaml"]
+```bash
+inspect eval my_eval.py --model openai/gpt-4o
 ```
 
-The **kathara** sandbox is functionally the same as **docker** but defaults to serial or low concurrency (1–2) and serializes container startup to avoid overwhelming Docker when many Kathara stacks run in parallel.
+## Configuration
 
-## API Reference
+### Sandbox in dataset
 
-### Core Functions
-
-#### `write_compose_for_lab(lab_path, output_path=None, startup_configs=None, default_machine=None, subnet_base=None, startup_pattern=None)`
-
-Generate and write `compose.yaml` from a Kathara lab configuration.
-
-**Parameters:**
-
-- **lab_path**: Path to directory containing `topology/lab.conf`
-- **output_path**: Output path (defaults to `lab_path/compose.yaml`)
-- **startup_configs**: Optional dict of machine name → startup script content (overrides files)
-- **default_machine**: Optional machine name to use as the default service
-- **subnet_base**: Reserved for future use
-- **startup_pattern**: Pattern for startup file path relative to `lab_path`, with `{name}` placeholder (default: `topology/{name}.startup`)
-
-**Returns:** Path to the generated `compose.yaml`.
-
-#### `generate_compose_for_inspect(lab_path, startup_configs=None, default_machine=None, startup_pattern=None)`
-
-Generate compose YAML as a string without writing to disk. Same parameters as above (except `output_path` and `subnet_base`).
-
-#### `parse_lab_conf(lab_conf_path)`
-
-Parse a Kathara `lab.conf` file.
-
-**Returns:** `LabConfig` with `machines: dict[str, MachineConfig]` and `metadata: dict[str, str]`.
-
-### Utility Functions
+Each sample specifies its sandbox as a tuple:
 
 ```python
-from inspect_kathara import (
-    get_machine_service_mapping,  # machine name → Docker service name
-    estimate_startup_time,        # estimated lab startup time in seconds
-    get_frr_services,             # list of FRR router service names
-    get_image_config,            # config dict for a Kathara image
-    is_routing_image,            # whether image is routing-capable
-    has_vtysh,                   # whether image has vtysh CLI
-    validate_kathara_image,       # validate/pull/build image; returns image name
-    IMAGE_CONFIGS,               # dict of all known image configs
-    LabConfig,                    # dataclass for parsed lab
+Sample(
+    input="Your prompt here",
+    sandbox=("docker", "path/to/compose.yaml"),
 )
 ```
 
-## Supported Kathara Images
+### compose.yaml key fields
+
+| Field | Purpose |
+|-------|---------|
+| `default` service | Where the agent starts (required) |
+| `cap_add: [NET_ADMIN]` | Allows network configuration |
+| `networks` | Defines isolated network segments |
+| `internal: true` | Prevents external internet access |
+
+### Accessing other containers
+
+From your solver or tools, use Inspect's [`sandbox()` API](https://inspect.aisi.org.uk/sandboxing.html):
+
+```python
+from inspect_ai.util import sandbox
+
+# Execute command on another container
+result = await sandbox("pc2").exec(["ping", "-c", "1", "10.0.1.10"])
 
 | Image | Description | Routing | vtysh |
 |-------|-------------|---------|-------|
@@ -144,18 +155,26 @@ See the [`examples/`](./examples/) directory:
 
 - **`router_troubleshoot/`** – Network troubleshooting evaluation with 15 fault-injection scenarios (iptables, sysctl, routing, etc.). See [examples/router_troubleshoot/README.md](./examples/router_troubleshoot/README.md) for topology and variants.
 
-## Requirements
+| Image | Description |
+|-------|-------------|
+| `kathara/base` | Debian with network tools (ping, ip, iptables) |
+| `kathara/frr` | FRRouting (BGP, OSPF, IS-IS) |
+| `kathara/quagga` | Quagga routing suite |
+| `kathara/bind` | BIND DNS server |
 
-- Python 3.10+
-- Docker (or OrbStack) for running sandboxes
-- Inspect AI >= 0.3.0
+## Known Limitations
+
+- **Root containers** — Containers run as root by default to allow network configuration (`NET_ADMIN`). This is intentional for network tooling but may not suit all security requirements.
+- **Docker bridge networking** — Network isolation uses Docker bridge mode, not hardware-level emulation. Packet timing and behavior may differ from physical networks.
+- **Resource limits** — Large topologies (10+ containers) may hit Docker memory/CPU limits. Configure Docker Desktop resources accordingly.
+- **No persistent state** — Containers are ephemeral. Any changes made during evaluation are lost when containers stop.
+
+## Further Reading
+
+- [Inspect AI Sandboxing](https://inspect.aisi.org.uk/sandboxing.html) — Full `sandbox()` API reference
+- [Inspect AI Tools](https://inspect.aisi.org.uk/tools.html) — How to create custom tools with `@tool`
+- [Kathara](https://www.kathara.org/) — The network emulation framework these images are based on
 
 ## License
 
-MIT License – see [LICENSE](./LICENSE) for details.
-
-## Related Projects
-
-- [Inspect AI](https://inspect.aisi.org.uk/) – AI evaluation framework
-- [Kathara](https://www.kathara.org/) – Network emulation tool
-- [inspect-kathara-environment](https://github.com/otelcos/inspect-kathara-environment) – NIKA evaluations using this library
+MIT License — see [LICENSE](./LICENSE) for details.
